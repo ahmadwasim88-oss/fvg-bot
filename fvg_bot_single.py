@@ -3,7 +3,6 @@ import json
 import os
 from datetime import datetime
 
-# ── Config ────────────────────────────────────────────────────────
 TELEGRAM_TOKEN  = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID= os.environ.get("TELEGRAM_CHAT_ID", "")
 MIN_GAP_PCT     = float(os.environ.get("MIN_GAP", "0.5"))
@@ -12,7 +11,6 @@ EMA_PERIOD      = int(os.environ.get("EMA_PERIOD", "50"))
 MAX_EMA_DIST    = float(os.environ.get("MAX_EMA_DIST", "3.0"))
 MAX_WAIT        = int(os.environ.get("MAX_WAIT", "20"))
 EXIT_CANDLES    = int(os.environ.get("EXIT_CANDLES", "8"))
-SYMBOL          = "BTCUSDT"
 STATE_FILE      = "state.json"
 
 def send_telegram(msg):
@@ -25,23 +23,59 @@ def send_telegram(msg):
         print(f"Telegram failed: {e}")
 
 def fetch_candles(limit=300):
-    # Bybit V5 API — not blocked from GitHub Actions
-    url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={SYMBOL}&interval=15&limit={limit}"
+    # Try multiple public APIs until one works
+    apis = [
+        ("Kraken", fetch_kraken, limit),
+        ("OKX",    fetch_okx,    limit),
+        ("Gate",   fetch_gate,   limit),
+    ]
+    for name, fn, lim in apis:
+        try:
+            print(f"  Trying {name}...")
+            candles = fn(lim)
+            if candles and len(candles) > 50:
+                print(f"  Got {len(candles)} candles from {name}. Price: ${candles[-1]['close']:,.0f}")
+                return candles
+        except Exception as e:
+            print(f"  {name} failed: {e}")
+    raise Exception("All APIs failed")
+
+def fetch_kraken(limit):
+    # Kraken OHLC — BTC/USDT perpetual proxy via XBT/USDT spot
+    url = "https://api.kraken.com/0/public/OHLC?pair=XBTUSDT&interval=15"
     r = requests.get(url, timeout=15)
     r.raise_for_status()
     data = r.json()
-    if data.get("retCode") != 0:
-        raise Exception(f"Bybit API error: {data.get('retMsg')}")
-    # Bybit returns newest first — reverse to oldest first
-    raw = data["result"]["list"]
+    if data.get("error"):
+        raise Exception(str(data["error"]))
+    key = list(data["result"].keys())[0]
+    raw = data["result"][key]
+    candles = [{"time": int(c[0])*1000, "open": float(c[1]), "high": float(c[2]),
+                "low": float(c[3]), "close": float(c[4])} for c in raw]
+    return candles[-limit:]
+
+def fetch_okx(limit):
+    # OKX public API
+    url = f"https://www.okx.com/api/v5/market/candles?instId=BTC-USDT-SWAP&bar=15m&limit={limit}"
+    r = requests.get(url, timeout=15)
+    r.raise_for_status()
+    data = r.json()
+    if data.get("code") != "0":
+        raise Exception(data.get("msg"))
+    raw = data["data"]
     raw.reverse()
-    return [{
-        "time":  int(c[0]),
-        "open":  float(c[1]),
-        "high":  float(c[2]),
-        "low":   float(c[3]),
-        "close": float(c[4])
-    } for c in raw]
+    return [{"time": int(c[0]), "open": float(c[1]), "high": float(c[2]),
+             "low": float(c[3]), "close": float(c[4])} for c in raw]
+
+def fetch_gate(limit):
+    # Gate.io public API
+    url = f"https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract=BTC_USDT&interval=15m&limit={limit}"
+    r = requests.get(url, timeout=15)
+    r.raise_for_status()
+    raw = r.json()
+    candles = [{"time": int(c["t"])*1000, "open": float(c["o"]), "high": float(c["h"]),
+                "low": float(c["l"]), "close": float(c["c"])} for c in raw]
+    return sorted(candles, key=lambda x: x["time"])
 
 def calc_ema(candles, period):
     k = 2 / (period + 1)
@@ -75,81 +109,65 @@ def run():
     closed_count = state.get("closed_count", 0)
     win_count    = state.get("win_count", 0)
 
-    print(f"Fetching candles from Bybit...")
     candles = fetch_candles(300)
-    print(f"Got {len(candles)} candles. Latest: ${candles[-1]['close']:,.0f}")
-    ema    = calc_ema(candles, EMA_PERIOD)
-    now_ts = candles[-1]["time"]
+    ema     = calc_ema(candles, EMA_PERIOD)
+    now_ts  = candles[-1]["time"]
 
     # ── 1. Detect FVG zones ───────────────────────────────────────
     for i in range(2, len(candles) - 1):
         c1, c3 = candles[i-2], candles[i]
 
-        # Bullish FVG: c3.low > c1.high
+        # Bullish FVG
         if c3["low"] > c1["high"]:
             gap = (c3["low"] - c1["high"]) / c1["high"] * 100
             fid = f"bull_{c1['time']}"
             if MIN_GAP_PCT <= gap <= MAX_GAP_PCT and fid not in seen_fvgs and fid not in open_trades:
                 end = min(i + MAX_WAIT + 1, len(candles))
                 for j in range(i+1, end):
-                    c  = candles[j]
-                    ev = ema[j]
+                    c = candles[j]; ev = ema[j]
                     if not ev: continue
                     if c["low"] <= c3["low"] and c["low"] >= c1["high"]:
                         dist = abs((c["close"] - ev) / ev * 100)
                         if c["close"] > ev and dist <= MAX_EMA_DIST:
-                            open_trades[fid] = {
-                                "type": "bull",
-                                "entryPrice": c["close"],
-                                "entryTime":  c["time"],
-                                "exitTime":   c["time"] + EXIT_CANDLES * 15 * 60 * 1000,
-                                "gapPct":     round(gap, 2),
-                                "distPct":    round(dist, 2)
-                            }
+                            open_trades[fid] = {"type":"bull","entryPrice":c["close"],
+                                "entryTime":c["time"],"exitTime":c["time"]+EXIT_CANDLES*15*60*1000,
+                                "gapPct":round(gap,2),"distPct":round(dist,2)}
                             send_telegram(
-                                f"📈 <b>BULL FVG — {SYMBOL}</b>\n\n"
+                                f"📈 <b>BULL FVG — BTCUSDT</b>\n\n"
                                 f"Entry: <b>${c['close']:,.0f}</b>\n"
                                 f"Gap: {round(gap,2)}%  |  EMA dist: {round(dist,2)}%\n"
                                 f"TP: ${c['close']*1.0062:,.0f}  (+0.62%)\n"
                                 f"SL: ${c['close']*0.9943:,.0f}  (-0.57%)\n"
-                                f"Exit: 2h from now ⏱\n"
-                                f"Time: {datetime.fromtimestamp(c['time']/1000).strftime('%d/%m %H:%M')}"
+                                f"Exit: 2h ⏱  {datetime.fromtimestamp(c['time']/1000).strftime('%d/%m %H:%M')}"
                             )
-                            print(f"  BULL signal at ${c['close']:,.0f}")
+                            print(f"  BULL signal ${c['close']:,.0f}")
                         seen_fvgs.add(fid)
                         break
 
-        # Bearish FVG: c1.low > c3.high
+        # Bearish FVG
         if c1["low"] > c3["high"]:
             gap = (c1["low"] - c3["high"]) / c3["high"] * 100
             fid = f"bear_{c1['time']}"
             if MIN_GAP_PCT <= gap <= MAX_GAP_PCT and fid not in seen_fvgs and fid not in open_trades:
                 end = min(i + MAX_WAIT + 1, len(candles))
                 for j in range(i+1, end):
-                    c  = candles[j]
-                    ev = ema[j]
+                    c = candles[j]; ev = ema[j]
                     if not ev: continue
                     if c["high"] >= c3["high"] and c["high"] <= c1["low"]:
                         dist = abs((c["close"] - ev) / ev * 100)
                         if c["close"] < ev and dist <= MAX_EMA_DIST:
-                            open_trades[fid] = {
-                                "type": "bear",
-                                "entryPrice": c["close"],
-                                "entryTime":  c["time"],
-                                "exitTime":   c["time"] + EXIT_CANDLES * 15 * 60 * 1000,
-                                "gapPct":     round(gap, 2),
-                                "distPct":    round(dist, 2)
-                            }
+                            open_trades[fid] = {"type":"bear","entryPrice":c["close"],
+                                "entryTime":c["time"],"exitTime":c["time"]+EXIT_CANDLES*15*60*1000,
+                                "gapPct":round(gap,2),"distPct":round(dist,2)}
                             send_telegram(
-                                f"📉 <b>BEAR FVG — {SYMBOL}</b>\n\n"
+                                f"📉 <b>BEAR FVG — BTCUSDT</b>\n\n"
                                 f"Entry: <b>${c['close']:,.0f}</b>\n"
                                 f"Gap: {round(gap,2)}%  |  EMA dist: {round(dist,2)}%\n"
                                 f"TP: ${c['close']*0.9938:,.0f}  (+0.62%)\n"
                                 f"SL: ${c['close']*1.0057:,.0f}  (-0.57%)\n"
-                                f"Exit: 2h from now ⏱\n"
-                                f"Time: {datetime.fromtimestamp(c['time']/1000).strftime('%d/%m %H:%M')}"
+                                f"Exit: 2h ⏱  {datetime.fromtimestamp(c['time']/1000).strftime('%d/%m %H:%M')}"
                             )
-                            print(f"  BEAR signal at ${c['close']:,.0f}")
+                            print(f"  BEAR signal ${c['close']:,.0f}")
                         seen_fvgs.add(fid)
                         break
 
@@ -160,36 +178,30 @@ def run():
             exit_c = next((c for c in reversed(candles) if c["time"] <= trade["exitTime"]), None)
             if not exit_c: continue
             ep  = exit_c["close"]
-            raw = (ep - trade["entryPrice"]) / trade["entryPrice"] * 100 \
-                  if trade["type"] == "bull" \
-                  else (trade["entryPrice"] - ep) / trade["entryPrice"] * 100
+            raw = (ep-trade["entryPrice"])/trade["entryPrice"]*100 if trade["type"]=="bull" \
+                  else (trade["entryPrice"]-ep)/trade["entryPrice"]*100
             pnl = round(raw, 3)
             win = pnl > 0
             closed_count += 1
             if win: win_count += 1
-            wr = win_count / closed_count * 100
+            wr = win_count/closed_count*100
             send_telegram(
                 f"{'✅' if win else '❌'} <b>TRADE CLOSED — {'WIN' if win else 'LOSS'}</b>\n\n"
                 f"{'BULL' if trade['type']=='bull' else 'BEAR'} | "
                 f"Entry: ${trade['entryPrice']:,.0f} → Exit: ${ep:,.0f}\n"
                 f"P&L: <b>{'+' if pnl>0 else ''}{pnl}%</b>\n\n"
-                f"📊 Running: {win_count}W / {closed_count-win_count}L | WR: {wr:.0f}%"
+                f"📊 {win_count}W / {closed_count-win_count}L | WR: {wr:.0f}%"
             )
             closed_now.append(fid)
-            print(f"  {'WIN' if win else 'LOSS'}: {pnl}% | WR: {wr:.0f}%")
+            print(f"  {'WIN' if win else 'LOSS'} {pnl}% WR:{wr:.0f}%")
 
     for fid in closed_now:
         open_trades.pop(fid, None)
 
-    # ── 3. Save state ─────────────────────────────────────────────
-    save_state({
-        "open_trades":  open_trades,
-        "seen_fvgs":    list(seen_fvgs)[-500:],
-        "closed_count": closed_count,
-        "win_count":    win_count
-    })
-    print(f"Done. Open: {len(open_trades)} | Closed: {closed_count} | WR: {win_count}/{closed_count}")
+    save_state({"open_trades":open_trades,"seen_fvgs":list(seen_fvgs)[-500:],
+                "closed_count":closed_count,"win_count":win_count})
+    print(f"Done. Open:{len(open_trades)} Closed:{closed_count} WR:{win_count}/{closed_count}")
 
 if __name__ == "__main__":
     run()
-                    
+                                                                           
