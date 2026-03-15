@@ -21,14 +21,6 @@ jobs:
       - name: Install dependencies
         run: pip install requests
 
-      - name: Restore state
-        run: |
-          if [ -f state.json ]; then
-            echo "State file exists"
-          else
-            echo "{}" > state.json
-          fi
-
       - name: Run FVG scan
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
@@ -39,6 +31,7 @@ jobs:
         run: |
           git config user.name "FVG Bot"
           git config user.email "bot@fvg.com"
+          git pull --rebase origin main
           git add state.json
           git diff --staged --quiet || git commit -m "Update state [skip ci]"
           git push
