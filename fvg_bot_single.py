@@ -15,6 +15,14 @@ EXIT_CANDLES    = int(os.environ.get("EXIT_CANDLES", "8"))
 SYMBOL          = "BTCUSDT"
 STATE_FILE      = "state.json"
 
+# Binance API endpoints — tries each until one works
+BINANCE_ENDPOINTS = [
+    "https://fapi.binance.com",
+    "https://fapi1.binance.com",
+    "https://fapi2.binance.com",
+    "https://fapi3.binance.com",
+]
+
 def send_telegram(msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
@@ -25,11 +33,22 @@ def send_telegram(msg):
         print(f"Telegram failed: {e}")
 
 def fetch_candles(limit=300):
-    url = f"https://fapi.binance.com/fapi/v1/klines?symbol={SYMBOL}&interval=15m&limit={limit}"
-    r = requests.get(url, timeout=10)
-    r.raise_for_status()
-    return [{"time": c[0], "open": float(c[1]), "high": float(c[2]),
-             "low": float(c[3]), "close": float(c[4])} for c in r.json()]
+    for base in BINANCE_ENDPOINTS:
+        try:
+            url = f"{base}/fapi/v1/klines?symbol={SYMBOL}&interval=15m&limit={limit}"
+            r = requests.get(url, timeout=15)
+            if r.status_code == 451:
+                print(f"  {base} blocked (451), trying next...")
+                continue
+            r.raise_for_status()
+            data = r.json()
+            print(f"  Fetched {len(data)} candles from {base}")
+            return [{"time": c[0], "open": float(c[1]), "high": float(c[2]),
+                     "low": float(c[3]), "close": float(c[4])} for c in data]
+        except Exception as e:
+            print(f"  {base} failed: {e}, trying next...")
+            continue
+    raise Exception("All Binance endpoints blocked or failed. Try adding a VPN proxy.")
 
 def calc_ema(candles, period):
     k = 2 / (period + 1)
@@ -46,8 +65,6 @@ def calc_ema(candles, period):
     return result
 
 def load_state():
-    # State is stored in GitHub Actions cache via state.json committed back
-    # We use a simple approach: read from file if exists
     try:
         with open(STATE_FILE) as f:
             return json.load(f)
@@ -59,7 +76,7 @@ def save_state(state):
         json.dump(state, f)
 
 def run():
-    state = load_state()
+    state       = load_state()
     open_trades = state.get("open_trades", {})
     seen_fvgs   = set(state.get("seen_fvgs", []))
     closed_count= state.get("closed_count", 0)
@@ -78,7 +95,6 @@ def run():
             gap = (c3["low"] - c1["high"]) / c1["high"] * 100
             fid = f"bull_{c1['time']}"
             if MIN_GAP_PCT <= gap <= MAX_GAP_PCT and fid not in seen_fvgs and fid not in open_trades:
-                # check subsequent candles for fill
                 end = min(i + MAX_WAIT + 1, len(candles))
                 for j in range(i+1, end):
                     c = candles[j]
@@ -89,7 +105,8 @@ def run():
                         if c["close"] > ev and dist <= MAX_EMA_DIST:
                             open_trades[fid] = {
                                 "type": "bull", "entryPrice": c["close"],
-                                "entryTime": c["time"], "exitTime": c["time"] + EXIT_CANDLES * 15 * 60 * 1000,
+                                "entryTime": c["time"],
+                                "exitTime": c["time"] + EXIT_CANDLES * 15 * 60 * 1000,
                                 "gapPct": round(gap, 2), "distPct": round(dist, 2)
                             }
                             send_telegram(
@@ -102,8 +119,6 @@ def run():
                             )
                         seen_fvgs.add(fid)
                         break
-                else:
-                    pass  # not yet filled, don't add to seen
 
         # Bearish FVG
         if c1["low"] > c3["high"]:
@@ -120,7 +135,8 @@ def run():
                         if c["close"] < ev and dist <= MAX_EMA_DIST:
                             open_trades[fid] = {
                                 "type": "bear", "entryPrice": c["close"],
-                                "entryTime": c["time"], "exitTime": c["time"] + EXIT_CANDLES * 15 * 60 * 1000,
+                                "entryTime": c["time"],
+                                "exitTime": c["time"] + EXIT_CANDLES * 15 * 60 * 1000,
                                 "gapPct": round(gap, 2), "distPct": round(dist, 2)
                             }
                             send_telegram(
@@ -138,11 +154,9 @@ def run():
     closed_now = []
     for fid, trade in open_trades.items():
         if now_ts >= trade["exitTime"]:
-            # find exit candle
             exit_c = next((c for c in reversed(candles) if c["time"] <= trade["exitTime"]), None)
-            if not exit_c:
-                continue
-            ep = exit_c["close"]
+            if not exit_c: continue
+            ep  = exit_c["close"]
             raw = (ep - trade["entryPrice"]) / trade["entryPrice"] * 100 if trade["type"] == "bull" \
                   else (trade["entryPrice"] - ep) / trade["entryPrice"] * 100
             pnl = round(raw, 3)
@@ -152,7 +166,8 @@ def run():
             wr = win_count / closed_count * 100
             send_telegram(
                 f"{'✅' if win else '❌'} <b>TRADE CLOSED — {'WIN' if win else 'LOSS'}</b>\n\n"
-                f"{'BULL' if trade['type']=='bull' else 'BEAR'} | Entry: ${trade['entryPrice']:,.0f} → Exit: ${ep:,.0f}\n"
+                f"{'BULL' if trade['type']=='bull' else 'BEAR'} | "
+                f"Entry: ${trade['entryPrice']:,.0f} → Exit: ${ep:,.0f}\n"
                 f"P&L: <b>{'+' if pnl>0 else ''}{pnl}%</b>\n\n"
                 f"📊 Running: {win_count}W / {closed_count-win_count}L | WR: {wr:.0f}%"
             )
@@ -162,14 +177,14 @@ def run():
         open_trades.pop(fid, None)
 
     # ── 3. Save state ─────────────────────────────────────────────
-    state = {
+    save_state({
         "open_trades": open_trades,
-        "seen_fvgs": list(seen_fvgs)[-500:],  # keep last 500
+        "seen_fvgs": list(seen_fvgs)[-500:],
         "closed_count": closed_count,
         "win_count": win_count
-    }
-    save_state(state)
+    })
     print(f"Done. Open: {len(open_trades)} | Closed: {closed_count} | WR: {win_count}/{closed_count}")
 
 if __name__ == "__main__":
     run()
+                                     
