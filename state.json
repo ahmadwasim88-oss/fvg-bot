@@ -1,1 +1,1 @@
-{"open_trades": {}, "seen_fvgs": ["bear_1773422100000", "bull_1773360000000", "bull_1773327600000", "bull_1773612900000", "bull_1773359100000"], "closed_count": 5, "win_count": 3}
+{"open_trades": {"bull_1773630900000": {"type": "bull", "entryPrice": 73517.4, "entryTime": 1773646200000, "exitTime": 1773653400000, "gapPct": 0.96, "distPct": 0.76}}, "seen_fvgs": ["bull_1773327600000", "bull_1773359100000", "bull_1773612900000", "bull_1773630900000", "bear_1773422100000", "bull_1773360000000"], "closed_count": 5, "win_count": 3}
