@@ -282,6 +282,30 @@ def main():
 
     cur_time = datetime.utcfromtimestamp(candles[-1]["t"]/1000).strftime("%H:%M UTC")
 
+    # Price update every run
+    cur = candles[-1]["c"]
+    high = max(c["h"] for c in candles[-96:])  # 24h high (96 x 15m)
+    low  = min(c["l"] for c in candles[-96:])  # 24h low
+    chg  = (cur - candles[-96]["c"]) / candles[-96]["c"] * 100  # 24h change
+    trade_info = ""
+    if state.get("open_trade"):
+        t = state["open_trade"]
+        live = (cur-t["entry"])/t["entry"]*100 if t["type"]=="bull" else (t["entry"]-cur)/t["entry"]*100
+        trade_info = (
+            f"
+📂 Open {'📈 LONG' if t['type']=='bull' else '📉 SHORT'}: "
+            f"${t['entry']:,.1f} → {'+' if live>0 else ''}{live:.2f}%"
+        )
+    send_telegram(
+        f"💹 <b>BTC/USDT.P</b>  ${cur:,.1f}
+"
+        f"24h: {'+' if chg>0 else ''}{chg:.2f}%  "
+        f"H: ${high:,.1f}  L: ${low:,.1f}"
+        f"{trade_info}
+"
+        f"⏰ {cur_time} IST+5:30"
+    )
+
     # Daily heartbeat
     state = maybe_send_daily(candles, state, source)
 
@@ -336,3 +360,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+        
