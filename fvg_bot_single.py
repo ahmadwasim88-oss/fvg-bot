@@ -228,7 +228,7 @@ def maybe_send_daily(candles, state, source):
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     hour  = datetime.now(timezone.utc).hour
     # Send once per day between 08:00–09:00 UTC
-    if state.get("last_daily") == today or not (8 <= hour < 9):
+    if state.get("last_daily") == today or not (2 <= hour < 4):  # 02:30 UTC = 08:00 IST
         return state
 
     cur   = candles[-1]["c"]
