@@ -283,28 +283,27 @@ def main():
     cur_time = datetime.utcfromtimestamp(candles[-1]["t"]/1000).strftime("%H:%M UTC")
 
     # Price update every run
-    cur = candles[-1]["c"]
-    high = max(c["h"] for c in candles[-96:])  # 24h high (96 x 15m)
-    low  = min(c["l"] for c in candles[-96:])  # 24h low
-    chg  = (cur - candles[-96]["c"]) / candles[-96]["c"] * 100  # 24h change
-    trade_info = ""
+    cur  = candles[-1]["c"]
+    high = max(c["h"] for c in candles[-96:])
+    low  = min(c["l"] for c in candles[-96:])
+    chg  = (cur - candles[-96]["c"]) / candles[-96]["c"] * 100
+    chg_sign = "+" if chg > 0 else ""
+    trade_line = ""
     if state.get("open_trade"):
-        t = state["open_trade"]
-        live = (cur-t["entry"])/t["entry"]*100 if t["type"]=="bull" else (t["entry"]-cur)/t["entry"]*100
-        trade_info = (
-            f"
-📂 Open {'📈 LONG' if t['type']=='bull' else '📉 SHORT'}: "
-            f"${t['entry']:,.1f} → {'+' if live>0 else ''}{live:.2f}%"
-        )
-    send_telegram(
-        f"💹 <b>BTC/USDT.P</b>  ${cur:,.1f}
-"
-        f"24h: {'+' if chg>0 else ''}{chg:.2f}%  "
-        f"H: ${high:,.1f}  L: ${low:,.1f}"
-        f"{trade_info}
-"
-        f"⏰ {cur_time} IST+5:30"
+        t    = state["open_trade"]
+        live = (cur - t["entry"]) / t["entry"] * 100 if t["type"] == "bull" else (t["entry"] - cur) / t["entry"] * 100
+        side = "LONG" if t["type"] == "bull" else "SHORT"
+        lsign = "+" if live > 0 else ""
+        trade_line = "\n📂 Open " + side + ": $" + "{:,.1f}".format(t["entry"]) + " → " + lsign + "{:.2f}%".format(live)
+    price_msg = (
+        "💹 <b>BTC/USDT.P</b>  $" + "{:,.1f}".format(cur) + "\n" +
+        "24h: " + chg_sign + "{:.2f}%".format(chg) + "  " +
+        "H: $" + "{:,.1f}".format(high) + "  L: $" + "{:,.1f}".format(low) +
+        trade_line + "\n" +
+        "⏰ " + cur_time
     )
+    send_telegram(price_msg)
+
 
     # Daily heartbeat
     state = maybe_send_daily(candles, state, source)
