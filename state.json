@@ -1,9 +1,25 @@
 {
-  "open_trade": null,
-  "seen_signals": [],
+  "open_trade": {
+    "type": "bull",
+    "entry": 70155.5,
+    "sl": 69696.83,
+    "tp": 70669.5,
+    "sl_pct": 0.65,
+    "tp_pct": 0.73,
+    "rr": 1.12,
+    "gap": 0.67,
+    "leverage": 15.3,
+    "fvg_top": 70305.4,
+    "fvg_bot": 69836.5,
+    "bos_level": 70669.5,
+    "time": 1773960300000
+  },
+  "seen_signals": [
+    "bull_1773960300000_70156"
+  ],
   "trades": [],
   "wins": 0,
   "losses": 0,
-  "run_count": 31,
+  "run_count": 32,
   "last_daily": ""
 }
