@@ -1,25 +1,23 @@
 {
-  "open_trade": {
-    "type": "bull",
-    "entry": 70155.5,
-    "sl": 69696.83,
-    "tp": 70669.5,
-    "sl_pct": 0.65,
-    "tp_pct": 0.73,
-    "rr": 1.12,
-    "gap": 0.67,
-    "leverage": 15.3,
-    "fvg_top": 70305.4,
-    "fvg_bot": 69836.5,
-    "bos_level": 70669.5,
-    "time": 1773960300000
-  },
+  "open_trade": null,
   "seen_signals": [
     "bull_1773960300000_70156"
   ],
-  "trades": [],
-  "wins": 0,
+  "trades": [
+    {
+      "type": "bull",
+      "entry": 70155.5,
+      "exit": 70686.7,
+      "result": "tp",
+      "pnl": 0.73
+    }
+  ],
+  "wins": 1,
   "losses": 0,
   "run_count": 37,
+<<<<<<< Updated upstream
   "last_daily": ""
+=======
+  "last_daily": "2026-03-20"
+>>>>>>> Stashed changes
 }
