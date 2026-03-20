@@ -192,13 +192,23 @@ def save_state(s):
 def check_open_trade(candles, state):
     trade = state.get("open_trade")
     if not trade: return state
-    cur = candles[-1]["c"]
-    typ = trade["type"]
-    hit_sl = (typ=="bull" and cur<=trade["sl"]) or (typ=="bear" and cur>=trade["sl"])
-    hit_tp = (typ=="bull" and cur>=trade["tp"]) or (typ=="bear" and cur<=trade["tp"])
+    cur  = candles[-1]["c"]
+    low  = candles[-1]["l"]   # check candle low for SL
+    high = candles[-1]["h"]   # check candle high for TP
+    typ  = trade["type"]
+
+    # Use candle low/high for more accurate SL/TP detection
+    # Worst case: if both hit same candle, SL wins
+    if typ == "bull":
+        hit_sl = low  <= trade["sl"]
+        hit_tp = high >= trade["tp"]
+    else:
+        hit_sl = high >= trade["sl"]
+        hit_tp = low  <= trade["tp"]
+
     if not (hit_sl or hit_tp): return state
 
-    win = hit_tp and not hit_sl  # worst case: if both hit, SL wins
+    win = hit_tp and not hit_sl  # SL wins if both hit same candle
     pnl = trade["tp_pct"] if win else -trade["sl_pct"]
     if win: state["wins"] += 1
     else:   state["losses"] += 1
@@ -359,3 +369,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+        
