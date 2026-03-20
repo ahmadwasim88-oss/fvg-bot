@@ -103,14 +103,50 @@ def swing_low(candles, idx, lb):
     return l
 
 # ── BOS + FVG Detection ───────────────────────────────────────────
+def nearest_swing_high_above(candles, entry, lookback):
+    """Find nearest swing high candle peak above entry price within lookback."""
+    n = len(candles)
+    candidates = []
+    for i in range(max(0, n-lookback), n):
+        h = candles[i]["h"]
+        if h > entry:
+            # confirm it's a local high (higher than neighbours)
+            left  = candles[i-1]["h"] if i > 0 else 0
+            right = candles[i+1]["h"] if i < n-1 else 0
+            if h >= left and h >= right:
+                candidates.append(h)
+    if not candidates:
+        # fallback: just max high above entry
+        highs = [c["h"] for c in candles[-lookback:] if c["h"] > entry]
+        return min(highs) if highs else None
+    return min(candidates)  # nearest (lowest) swing high above entry
+
+def nearest_swing_low_below(candles, entry, lookback):
+    """Find nearest swing low candle trough below entry price within lookback."""
+    n = len(candles)
+    candidates = []
+    for i in range(max(0, n-lookback), n):
+        l = candles[i]["l"]
+        if l < entry:
+            left  = candles[i-1]["l"] if i > 0 else float("inf")
+            right = candles[i+1]["l"] if i < n-1 else float("inf")
+            if l <= left and l <= right:
+                candidates.append(l)
+    if not candidates:
+        lows = [c["l"] for c in candles[-lookback:] if c["l"] < entry]
+        return max(lows) if lows else None
+    return max(candidates)  # nearest (highest) swing low below entry
+
 def find_signal(candles):
     closes = [c["c"] for c in candles]
     ema    = calc_ema(closes, EMA_PERIOD)
     lb     = BOS_LOOKBACK
     n      = len(candles)
     cur    = candles[-1]["c"]
+    last_ev = ema[n-1]
 
-    for i in range(max(lb+2, n-10), n-1):
+    # Scan last 15 candles for a fresh BOS
+    for i in range(max(lb+2, n-15), n-1):
         prev      = candles[i-lb:i]
         prev_high = max(c["h"] for c in prev)
         prev_low  = min(c["l"] for c in prev)
@@ -118,8 +154,9 @@ def find_signal(candles):
         ev        = ema[i]
         if ev is None: continue
 
-        # Bullish BOS
+        # ── Bullish BOS: close breaks above N-candle high ────────
         if c_bos["c"] > prev_high:
+            # Find bullish FVG within the last 10 candles before BOS
             for fi in range(max(lb+2, i-10), i+1):
                 if fi < 2: continue
                 c1, c2, c3 = candles[fi-2], candles[fi-1], candles[fi]
@@ -127,26 +164,36 @@ def find_signal(candles):
                     gap = (c3["l"] - c1["h"]) / c1["h"] * 100
                     if not (MIN_GAP <= gap <= MAX_GAP): continue
                     fvg_top, fvg_bot = c3["l"], c1["h"]
-                    if cur <= fvg_top * 1.05:
-                        slope = ema_slope(ema, i)
-                        dist  = abs((cur - ev) / ev * 100)
-                        if cur > ev and slope > 0 and dist <= MAX_EMA_DIST:
+
+                    # Price must be pulling back into or near the FVG
+                    if cur <= fvg_top * 1.02:
+                        if last_ev is None: break
+                        slope = ema_slope(ema, n-1)
+                        dist  = abs((cur - last_ev) / last_ev * 100)
+                        if cur > last_ev and slope > 0 and dist <= MAX_EMA_DIST:
                             entry  = cur
                             sl     = fvg_bot * (1 - SL_BUFFER/100)
-                            tp     = swing_high(candles, i, SWING_LOOKBACK)
+                            # TP = nearest swing high ABOVE entry (not BOS level)
+                            tp = nearest_swing_high_above(candles, entry, SWING_LOOKBACK)
                             if not tp or tp <= entry: break
+                            # Make sure TP is meaningfully above entry
+                            if (tp - entry) / entry * 100 < 0.3: break
                             sl_pct = abs((entry-sl)/entry*100)
                             tp_pct = (tp-entry)/entry*100
                             rr     = tp_pct/sl_pct if sl_pct > 0 else 0
                             if rr < MIN_RR: break
-                            lev    = min(round(RISK_PCT/sl_pct, 1), MAX_LEVERAGE)
-                            return {"type":"bull","entry":entry,"sl":round(sl,2),"tp":round(tp,2),
-                                    "sl_pct":round(sl_pct,2),"tp_pct":round(tp_pct,2),"rr":round(rr,2),
-                                    "gap":round(gap,2),"leverage":lev,"fvg_top":fvg_top,"fvg_bot":fvg_bot,
-                                    "bos_level":prev_high,"time":candles[-1]["t"]}
+                            lev = min(round(RISK_PCT/sl_pct, 1), MAX_LEVERAGE)
+                            return {
+                                "type":"bull","entry":entry,
+                                "sl":round(sl,2),"tp":round(tp,2),
+                                "sl_pct":round(sl_pct,2),"tp_pct":round(tp_pct,2),
+                                "rr":round(rr,2),"gap":round(gap,2),
+                                "leverage":lev,"fvg_top":fvg_top,"fvg_bot":fvg_bot,
+                                "bos_level":round(prev_high,2),"time":candles[-1]["t"],
+                            }
                     break
 
-        # Bearish BOS
+        # ── Bearish BOS: close breaks below N-candle low ─────────
         if c_bos["c"] < prev_low:
             for fi in range(max(lb+2, i-10), i+1):
                 if fi < 2: continue
@@ -155,23 +202,32 @@ def find_signal(candles):
                     gap = (c1["l"] - c3["h"]) / c3["h"] * 100
                     if not (MIN_GAP <= gap <= MAX_GAP): continue
                     fvg_top, fvg_bot = c1["l"], c3["h"]
-                    if cur >= fvg_bot * 0.95:
-                        slope = ema_slope(ema, i)
-                        dist  = abs((cur - ev) / ev * 100)
-                        if cur < ev and slope < 0 and dist <= MAX_EMA_DIST:
+
+                    # Price must be retracing into or near the FVG
+                    if cur >= fvg_bot * 0.98:
+                        if last_ev is None: break
+                        slope = ema_slope(ema, n-1)
+                        dist  = abs((cur - last_ev) / last_ev * 100)
+                        if cur < last_ev and slope < 0 and dist <= MAX_EMA_DIST:
                             entry  = cur
                             sl     = fvg_top * (1 + SL_BUFFER/100)
-                            tp     = swing_low(candles, i, SWING_LOOKBACK)
+                            # TP = nearest swing low BELOW entry
+                            tp = nearest_swing_low_below(candles, entry, SWING_LOOKBACK)
                             if not tp or tp >= entry: break
+                            if (entry - tp) / entry * 100 < 0.3: break
                             sl_pct = abs((sl-entry)/entry*100)
                             tp_pct = (entry-tp)/entry*100
                             rr     = tp_pct/sl_pct if sl_pct > 0 else 0
                             if rr < MIN_RR: break
-                            lev    = min(round(RISK_PCT/sl_pct, 1), MAX_LEVERAGE)
-                            return {"type":"bear","entry":entry,"sl":round(sl,2),"tp":round(tp,2),
-                                    "sl_pct":round(sl_pct,2),"tp_pct":round(tp_pct,2),"rr":round(rr,2),
-                                    "gap":round(gap,2),"leverage":lev,"fvg_top":fvg_top,"fvg_bot":fvg_bot,
-                                    "bos_level":prev_low,"time":candles[-1]["t"]}
+                            lev = min(round(RISK_PCT/sl_pct, 1), MAX_LEVERAGE)
+                            return {
+                                "type":"bear","entry":entry,
+                                "sl":round(sl,2),"tp":round(tp,2),
+                                "sl_pct":round(sl_pct,2),"tp_pct":round(tp_pct,2),
+                                "rr":round(rr,2),"gap":round(gap,2),
+                                "leverage":lev,"fvg_top":fvg_top,"fvg_bot":fvg_bot,
+                                "bos_level":round(prev_low,2),"time":candles[-1]["t"],
+                            }
                     break
     return None
 
@@ -369,4 +425,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-        
+    
