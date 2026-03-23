@@ -19,6 +19,8 @@ SL_BUFFER      = 0.2
 SWING_LOOKBACK = 30
 MIN_RR         = 1.0
 MAX_LEVERAGE   = 20
+VOL_FILTER     = float(os.environ.get("VOL_FILTER", "1.5"))   # BOS candle must be >= this x avg volume (0 = disabled)
+VOL_LOOKBACK   = int(os.environ.get("VOL_LOOKBACK", "20"))    # candles for avg volume
 
 STATE_FILE = "state.json"
 
@@ -55,19 +57,19 @@ def _kraken(limit):
     d = r.json()
     if d.get("error"): raise Exception(str(d["error"]))
     key = list(d["result"].keys())[0]
-    return [{"t":int(x[0])*1000,"o":float(x[1]),"h":float(x[2]),"l":float(x[3]),"c":float(x[4])} for x in d["result"][key]][-limit:]
+    return [{"t":int(x[0])*1000,"o":float(x[1]),"h":float(x[2]),"l":float(x[3]),"c":float(x[4]),"v":float(x[6])} for x in d["result"][key]][-limit:]
 
 def _okx(limit):
     r = requests.get(f"https://www.okx.com/api/v5/market/candles?instId=BTC-USDT-SWAP&bar=15m&limit={min(limit,300)}", timeout=15)
     r.raise_for_status()
     d = r.json()
     if d.get("code") != "0": raise Exception(d.get("msg"))
-    return [{"t":int(x[0]),"o":float(x[1]),"h":float(x[2]),"l":float(x[3]),"c":float(x[4])} for x in reversed(d["data"])]
+    return [{"t":int(x[0]),"o":float(x[1]),"h":float(x[2]),"l":float(x[3]),"c":float(x[4]),"v":float(x[5])} for x in reversed(d["data"])]
 
 def _gate(limit):
     r = requests.get(f"https://api.gateio.ws/api/v4/futures/usdt/candlesticks?contract=BTC_USDT&interval=15m&limit={min(limit,2000)}", timeout=15)
     r.raise_for_status()
-    return [{"t":int(x["t"])*1000,"o":float(x["o"]),"h":float(x["h"]),"l":float(x["l"]),"c":float(x["c"])} for x in r.json()]
+    return [{"t":int(x["t"])*1000,"o":float(x["o"]),"h":float(x["h"]),"l":float(x["l"]),"c":float(x["c"]),"v":float(x.get("v",0))} for x in r.json()]
 
 # ── Indicators ────────────────────────────────────────────────────
 def calc_ema(closes, period):
@@ -121,6 +123,10 @@ def nearest_swing_low_below(candles, entry, lookback):
             l = candles[i]["l"]
     return l if l < entry else None
 
+def avg_volume(candles, idx, lookback):
+    vols = [c.get("v", 0) for c in candles[max(0, idx-lookback):idx]]
+    return sum(vols) / len(vols) if vols else 0
+
 def find_signal(candles):
     closes = [c["c"] for c in candles]
     ema    = calc_ema(closes, EMA_PERIOD)
@@ -139,7 +145,9 @@ def find_signal(candles):
         if ev is None: continue
 
         # ── Bullish BOS: close breaks above N-candle high ────────
-        if c_bos["c"] > prev_high:
+        bos_vol_ok = (VOL_FILTER <= 0 or
+                      c_bos.get("v", 0) >= avg_volume(candles, i, VOL_LOOKBACK) * VOL_FILTER)
+        if c_bos["c"] > prev_high and bos_vol_ok:
             # Find bullish FVG within the last 10 candles before BOS
             for fi in range(max(lb+2, i-10), i+1):
                 if fi < 2: continue
@@ -178,7 +186,7 @@ def find_signal(candles):
                     break
 
         # ── Bearish BOS: close breaks below N-candle low ─────────
-        if c_bos["c"] < prev_low:
+        if c_bos["c"] < prev_low and bos_vol_ok:
             for fi in range(max(lb+2, i-10), i+1):
                 if fi < 2: continue
                 c1, c2, c3 = candles[fi-2], candles[fi-1], candles[fi]
@@ -409,3 +417,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+            
