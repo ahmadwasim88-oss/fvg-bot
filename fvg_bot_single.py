@@ -104,38 +104,22 @@ def swing_low(candles, idx, lb):
 
 # ── BOS + FVG Detection ───────────────────────────────────────────
 def nearest_swing_high_above(candles, entry, lookback):
-    """Find nearest swing high candle peak above entry price within lookback."""
+    """Max high in last N candles above entry — matches backtest swingHigh logic."""
     n = len(candles)
-    candidates = []
+    h = 0
     for i in range(max(0, n-lookback), n):
-        h = candles[i]["h"]
-        if h > entry:
-            # confirm it's a local high (higher than neighbours)
-            left  = candles[i-1]["h"] if i > 0 else 0
-            right = candles[i+1]["h"] if i < n-1 else 0
-            if h >= left and h >= right:
-                candidates.append(h)
-    if not candidates:
-        # fallback: just max high above entry
-        highs = [c["h"] for c in candles[-lookback:] if c["h"] > entry]
-        return min(highs) if highs else None
-    return min(candidates)  # nearest (lowest) swing high above entry
+        if candles[i]["h"] > h:
+            h = candles[i]["h"]
+    return h if h > entry else None
 
 def nearest_swing_low_below(candles, entry, lookback):
-    """Find nearest swing low candle trough below entry price within lookback."""
+    """Min low in last N candles below entry — matches backtest swingLow logic."""
     n = len(candles)
-    candidates = []
+    l = float("inf")
     for i in range(max(0, n-lookback), n):
-        l = candles[i]["l"]
-        if l < entry:
-            left  = candles[i-1]["l"] if i > 0 else float("inf")
-            right = candles[i+1]["l"] if i < n-1 else float("inf")
-            if l <= left and l <= right:
-                candidates.append(l)
-    if not candidates:
-        lows = [c["l"] for c in candles[-lookback:] if c["l"] < entry]
-        return max(lows) if lows else None
-    return max(candidates)  # nearest (highest) swing low below entry
+        if candles[i]["l"] < l:
+            l = candles[i]["l"]
+    return l if l < entry else None
 
 def find_signal(candles):
     closes = [c["c"] for c in candles]
@@ -281,7 +265,7 @@ def check_open_trade(candles, state):
         f"Result:  {'TP hit 🎯' if win else 'SL hit 🛑'}\n"
         f"P&amp;L:     {'+' if pnl>0 else ''}{pnl:.2f}%\n\n"
         f"📊 Record: {state['wins']}W / {state['losses']}L ({wr:.0f}% WR)\n"
-        f"🎯 Backtest target: 69% WR"
+        f"🎯 Backtest target: 60% WR"
     )
     state["trades"].append({"type":typ,"entry":trade["entry"],"exit":cur,
                              "result":"tp" if win else "sl","pnl":round(pnl,3)})
@@ -425,4 +409,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
