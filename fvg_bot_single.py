@@ -9,7 +9,6 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 ACCOUNT_SIZE     = float(os.environ.get("ACCOUNT_SIZE", "1000"))
 RISK_PCT         = float(os.environ.get("RISK_PCT", "10"))
 
-# Strategy params
 BOS_LOOKBACK   = 10
 MIN_GAP        = 0.5
 MAX_GAP        = 1.5
@@ -19,8 +18,8 @@ SL_BUFFER      = 0.2
 SWING_LOOKBACK = 30
 MIN_RR         = 1.0
 MAX_LEVERAGE   = 20
-VOL_FILTER     = float(os.environ.get("VOL_FILTER", "1.5"))   # BOS candle must be >= this x avg volume (0 = disabled)
-VOL_LOOKBACK   = int(os.environ.get("VOL_LOOKBACK", "20"))    # candles for avg volume
+VOL_FILTER     = float(os.environ.get("VOL_FILTER", "1.5"))
+VOL_LOOKBACK   = int(os.environ.get("VOL_LOOKBACK", "20"))
 
 STATE_FILE = "state.json"
 
@@ -92,50 +91,110 @@ def has_impulse(c):
     rng  = c["h"] - c["l"]
     return rng > 0 and body / rng >= 0.6
 
-def swing_high(candles, idx, lb):
-    h = 0
-    for i in range(max(0, idx-lb), idx):
-        if candles[i]["h"] > h: h = candles[i]["h"]
-    return h
-
-def swing_low(candles, idx, lb):
-    l = float("inf")
-    for i in range(max(0, idx-lb), idx):
-        if candles[i]["l"] < l: l = candles[i]["l"]
-    return l
-
-# ── BOS + FVG Detection ───────────────────────────────────────────
-def nearest_swing_high_above(candles, entry, lookback):
-    """Max high in last N candles above entry — matches backtest swingHigh logic."""
-    n = len(candles)
-    h = 0
-    for i in range(max(0, n-lookback), n):
-        if candles[i]["h"] > h:
-            h = candles[i]["h"]
-    return h if h > entry else None
-
-def nearest_swing_low_below(candles, entry, lookback):
-    """Min low in last N candles below entry — matches backtest swingLow logic."""
-    n = len(candles)
-    l = float("inf")
-    for i in range(max(0, n-lookback), n):
-        if candles[i]["l"] < l:
-            l = candles[i]["l"]
-    return l if l < entry else None
-
 def avg_volume(candles, idx, lookback):
     vols = [c.get("v", 0) for c in candles[max(0, idx-lookback):idx]]
     return sum(vols) / len(vols) if vols else 0
 
-def find_signal(candles):
+def nearest_swing_high_above(candles, entry, lookback):
+    n = len(candles)
+    h = 0
+    for i in range(max(0, n-lookback), n):
+        if candles[i]["h"] > h: h = candles[i]["h"]
+    return h if h > entry else None
+
+def nearest_swing_low_below(candles, entry, lookback):
+    n = len(candles)
+    l = float("inf")
+    for i in range(max(0, n-lookback), n):
+        if candles[i]["l"] < l: l = candles[i]["l"]
+    return l if l < entry else None
+
+# ── Stage 1: Find active setups (BOS + FVG formed, waiting for pullback) ──
+def find_setups(candles):
+    """
+    Scans for BOS+FVG setups where price has NOT yet pulled back into FVG.
+    Returns list of active setups to watch.
+    """
     closes = [c["c"] for c in candles]
     ema    = calc_ema(closes, EMA_PERIOD)
     lb     = BOS_LOOKBACK
     n      = len(candles)
     cur    = candles[-1]["c"]
     last_ev = ema[n-1]
+    setups  = []
 
-    # Scan last 15 candles for a fresh BOS
+    for i in range(max(lb+2, n-30), n-1):  # scan last 30 candles for setups
+        prev      = candles[i-lb:i]
+        prev_high = max(c["h"] for c in prev)
+        prev_low  = min(c["l"] for c in prev)
+        c_bos     = candles[i]
+        ev        = ema[i]
+        if ev is None: continue
+
+        bos_vol_ok = (VOL_FILTER <= 0 or
+                      c_bos.get("v", 0) >= avg_volume(candles, i, VOL_LOOKBACK) * VOL_FILTER)
+
+        # ── Bullish BOS + FVG setup ───────────────────────────────
+        if c_bos["c"] > prev_high and bos_vol_ok:
+            for fi in range(max(lb+2, i-10), i+1):
+                if fi < 2: continue
+                c1, c2, c3 = candles[fi-2], candles[fi-1], candles[fi]
+                if c3["l"] > c1["h"] and has_impulse(c2):
+                    gap = (c3["l"] - c1["h"]) / c1["h"] * 100
+                    if not (MIN_GAP <= gap <= MAX_GAP): continue
+                    fvg_top, fvg_bot = c3["l"], c1["h"]
+                    # Setup valid: price is ABOVE FVG (hasn't pulled back yet)
+                    if cur > fvg_top:
+                        slope = ema_slope(ema, n-1)
+                        if last_ev and cur > last_ev and slope > 0:
+                            dist_to_fvg = (cur - fvg_top) / fvg_top * 100
+                            setups.append({
+                                "type": "bull",
+                                "bos_level": round(prev_high, 2),
+                                "fvg_top": round(fvg_top, 2),
+                                "fvg_bot": round(fvg_bot, 2),
+                                "gap": round(gap, 2),
+                                "dist_to_fvg": round(dist_to_fvg, 2),
+                                "bos_time": candles[i]["t"],
+                            })
+                    break
+
+        # ── Bearish BOS + FVG setup ───────────────────────────────
+        if c_bos["c"] < prev_low and bos_vol_ok:
+            for fi in range(max(lb+2, i-10), i+1):
+                if fi < 2: continue
+                c1, c2, c3 = candles[fi-2], candles[fi-1], candles[fi]
+                if c1["l"] > c3["h"] and has_impulse(c2):
+                    gap = (c1["l"] - c3["h"]) / c3["h"] * 100
+                    if not (MIN_GAP <= gap <= MAX_GAP): continue
+                    fvg_top, fvg_bot = c1["l"], c3["h"]
+                    # Setup valid: price is BELOW FVG (hasn't pulled back yet)
+                    if cur < fvg_bot:
+                        slope = ema_slope(ema, n-1)
+                        if last_ev and cur < last_ev and slope < 0:
+                            dist_to_fvg = (fvg_bot - cur) / cur * 100
+                            setups.append({
+                                "type": "bear",
+                                "bos_level": round(prev_low, 2),
+                                "fvg_top": round(fvg_top, 2),
+                                "fvg_bot": round(fvg_bot, 2),
+                                "gap": round(gap, 2),
+                                "dist_to_fvg": round(dist_to_fvg, 2),
+                                "bos_time": candles[i]["t"],
+                            })
+                    break
+
+    return setups
+
+# ── Stage 2: Find entry signal (FVG being filled right now) ──────
+def find_signal(candles):
+    closes  = [c["c"] for c in candles]
+    ema     = calc_ema(closes, EMA_PERIOD)
+    lb      = BOS_LOOKBACK
+    n       = len(candles)
+    cur     = candles[-1]["c"]
+    last_ev = ema[n-1]
+
     for i in range(max(lb+2, n-15), n-1):
         prev      = candles[i-lb:i]
         prev_high = max(c["h"] for c in prev)
@@ -144,11 +203,10 @@ def find_signal(candles):
         ev        = ema[i]
         if ev is None: continue
 
-        # ── Bullish BOS: close breaks above N-candle high ────────
         bos_vol_ok = (VOL_FILTER <= 0 or
                       c_bos.get("v", 0) >= avg_volume(candles, i, VOL_LOOKBACK) * VOL_FILTER)
+
         if c_bos["c"] > prev_high and bos_vol_ok:
-            # Find bullish FVG within the last 10 candles before BOS
             for fi in range(max(lb+2, i-10), i+1):
                 if fi < 2: continue
                 c1, c2, c3 = candles[fi-2], candles[fi-1], candles[fi]
@@ -156,8 +214,6 @@ def find_signal(candles):
                     gap = (c3["l"] - c1["h"]) / c1["h"] * 100
                     if not (MIN_GAP <= gap <= MAX_GAP): continue
                     fvg_top, fvg_bot = c3["l"], c1["h"]
-
-                    # Price must be pulling back into or near the FVG
                     if cur <= fvg_top * 1.02:
                         if last_ev is None: break
                         slope = ema_slope(ema, n-1)
@@ -165,10 +221,8 @@ def find_signal(candles):
                         if cur > last_ev and slope > 0 and dist <= MAX_EMA_DIST:
                             entry  = cur
                             sl     = fvg_bot * (1 - SL_BUFFER/100)
-                            # TP = nearest swing high ABOVE entry (not BOS level)
-                            tp = nearest_swing_high_above(candles, entry, SWING_LOOKBACK)
+                            tp     = nearest_swing_high_above(candles, entry, SWING_LOOKBACK)
                             if not tp or tp <= entry: break
-                            # Make sure TP is meaningfully above entry
                             if (tp - entry) / entry * 100 < 0.3: break
                             sl_pct = abs((entry-sl)/entry*100)
                             tp_pct = (tp-entry)/entry*100
@@ -185,7 +239,6 @@ def find_signal(candles):
                             }
                     break
 
-        # ── Bearish BOS: close breaks below N-candle low ─────────
         if c_bos["c"] < prev_low and bos_vol_ok:
             for fi in range(max(lb+2, i-10), i+1):
                 if fi < 2: continue
@@ -194,8 +247,6 @@ def find_signal(candles):
                     gap = (c1["l"] - c3["h"]) / c3["h"] * 100
                     if not (MIN_GAP <= gap <= MAX_GAP): continue
                     fvg_top, fvg_bot = c1["l"], c3["h"]
-
-                    # Price must be retracing into or near the FVG
                     if cur >= fvg_bot * 0.98:
                         if last_ev is None: break
                         slope = ema_slope(ema, n-1)
@@ -203,8 +254,7 @@ def find_signal(candles):
                         if cur < last_ev and slope < 0 and dist <= MAX_EMA_DIST:
                             entry  = cur
                             sl     = fvg_top * (1 + SL_BUFFER/100)
-                            # TP = nearest swing low BELOW entry
-                            tp = nearest_swing_low_below(candles, entry, SWING_LOOKBACK)
+                            tp     = nearest_swing_low_below(candles, entry, SWING_LOOKBACK)
                             if not tp or tp >= entry: break
                             if (entry - tp) / entry * 100 < 0.3: break
                             sl_pct = abs((sl-entry)/entry*100)
@@ -229,8 +279,8 @@ def load_state():
         with open(STATE_FILE) as f:
             return json.load(f)
     except:
-        return {"open_trade":None,"seen_signals":[],"trades":[],
-                "wins":0,"losses":0,"run_count":0,"last_daily":""}
+        return {"open_trade":None,"seen_signals":[],"seen_setups":[],
+                "trades":[],"wins":0,"losses":0,"run_count":0,"last_daily":""}
 
 def save_state(s):
     with open(STATE_FILE, "w") as f:
@@ -241,12 +291,10 @@ def check_open_trade(candles, state):
     trade = state.get("open_trade")
     if not trade: return state
     cur  = candles[-1]["c"]
-    low  = candles[-1]["l"]   # check candle low for SL
-    high = candles[-1]["h"]   # check candle high for TP
+    low  = candles[-1]["l"]
+    high = candles[-1]["h"]
     typ  = trade["type"]
 
-    # Use candle low/high for more accurate SL/TP detection
-    # Worst case: if both hit same candle, SL wins
     if typ == "bull":
         hit_sl = low  <= trade["sl"]
         hit_tp = high >= trade["tp"]
@@ -256,7 +304,7 @@ def check_open_trade(candles, state):
 
     if not (hit_sl or hit_tp): return state
 
-    win = hit_tp and not hit_sl  # SL wins if both hit same candle
+    win = hit_tp and not hit_sl
     pnl = trade["tp_pct"] if win else -trade["sl_pct"]
     if win: state["wins"] += 1
     else:   state["losses"] += 1
@@ -273,7 +321,7 @@ def check_open_trade(candles, state):
         f"Result:  {'TP hit 🎯' if win else 'SL hit 🛑'}\n"
         f"P&amp;L:     {'+' if pnl>0 else ''}{pnl:.2f}%\n\n"
         f"📊 Record: {state['wins']}W / {state['losses']}L ({wr:.0f}% WR)\n"
-        f"🎯 Backtest target: 60% WR"
+        f"🎯 Backtest target: 67% WR"
     )
     state["trades"].append({"type":typ,"entry":trade["entry"],"exit":cur,
                              "result":"tp" if win else "sl","pnl":round(pnl,3)})
@@ -285,8 +333,7 @@ def check_open_trade(candles, state):
 def maybe_send_daily(candles, state, source):
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     hour  = datetime.now(timezone.utc).hour
-    # Send once per day between 08:00–09:00 UTC
-    if state.get("last_daily") == today or not (2 <= hour < 4):  # 02:30 UTC = 08:00 IST
+    if state.get("last_daily") == today or not (2 <= hour < 4):
         return state
 
     cur   = candles[-1]["c"]
@@ -295,8 +342,8 @@ def maybe_send_daily(candles, state, source):
 
     open_info = ""
     if state.get("open_trade"):
-        t       = state["open_trade"]
-        live    = (cur-t["entry"])/t["entry"]*100 if t["type"]=="bull" else (t["entry"]-cur)/t["entry"]*100
+        t    = state["open_trade"]
+        live = (cur-t["entry"])/t["entry"]*100 if t["type"]=="bull" else (t["entry"]-cur)/t["entry"]*100
         open_info = (
             f"\n📂 <b>Open trade:</b> {'📈 LONG' if t['type']=='bull' else '📉 SHORT'}\n"
             f"Entry: ${t['entry']:,.1f} → Now: ${cur:,.1f}\n"
@@ -311,9 +358,9 @@ def maybe_send_daily(candles, state, source):
         f"Source: {source}\n"
         f"{open_info}\n"
         f"📊 <b>Record:</b> {state['wins']}W / {state['losses']}L "
-        f"({'%.0f' % wr}% WR · target 69%)\n"
+        f"({'%.0f' % wr}% WR · target 67%)\n"
         f"Total trades: {total}\n\n"
-        f"⚙️ BOS({BOS_LOOKBACK}c) · FVG({MIN_GAP}–{MAX_GAP}%) · Risk {RISK_PCT}%\n"
+        f"⚙️ BOS({BOS_LOOKBACK}c) · FVG({MIN_GAP}–{MAX_GAP}%) · Vol {VOL_FILTER}x · Risk {RISK_PCT}%\n"
         f"Account: ${ACCOUNT_SIZE:,.0f}"
     )
     state["last_daily"] = today
@@ -324,11 +371,12 @@ def maybe_send_daily(candles, state, source):
 def main():
     print(f"\n{'='*50}")
     print(f"BOS+FVG Bot · {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC")
-    print(f"Account: ${ACCOUNT_SIZE:,.0f}  Risk: {RISK_PCT}%")
+    print(f"Account: ${ACCOUNT_SIZE:,.0f}  Risk: {RISK_PCT}%  Vol: {VOL_FILTER}x")
     print(f"{'='*50}")
 
     state = load_state()
     state["run_count"] = state.get("run_count", 0) + 1
+    state.setdefault("seen_setups", [])
 
     print("\nFetching candles...")
     try:
@@ -339,18 +387,18 @@ def main():
         return
 
     cur_time = datetime.utcfromtimestamp(candles[-1]["t"]/1000).strftime("%H:%M UTC")
+    cur = candles[-1]["c"]
 
-    # Price update every run
-    cur  = candles[-1]["c"]
+    # ── Price update ──────────────────────────────────────────────
     high = max(c["h"] for c in candles[-96:])
     low  = min(c["l"] for c in candles[-96:])
     chg  = (cur - candles[-96]["c"]) / candles[-96]["c"] * 100
     chg_sign = "+" if chg > 0 else ""
     trade_line = ""
     if state.get("open_trade"):
-        t    = state["open_trade"]
-        live = (cur - t["entry"]) / t["entry"] * 100 if t["type"] == "bull" else (t["entry"] - cur) / t["entry"] * 100
-        side = "LONG" if t["type"] == "bull" else "SHORT"
+        t     = state["open_trade"]
+        live  = (cur-t["entry"])/t["entry"]*100 if t["type"]=="bull" else (t["entry"]-cur)/t["entry"]*100
+        side  = "LONG" if t["type"] == "bull" else "SHORT"
         lsign = "+" if live > 0 else ""
         trade_line = "\n📂 Open " + side + ": $" + "{:,.1f}".format(t["entry"]) + " → " + lsign + "{:.2f}%".format(live)
     price_msg = (
@@ -362,19 +410,19 @@ def main():
     )
     send_telegram(price_msg)
 
-
-    # Daily heartbeat
+    # ── Daily heartbeat ───────────────────────────────────────────
     state = maybe_send_daily(candles, state, source)
 
-    # Check open trade exit
+    # ── Check open trade exit ─────────────────────────────────────
     if state.get("open_trade"):
         t = state["open_trade"]
         print(f"\nOpen {t['type'].upper()} | Entry:${t['entry']:,.1f} SL:${t['sl']:,.1f} TP:${t['tp']:,.1f}")
         state = check_open_trade(candles, state)
 
-    # Scan for new signal
     if not state.get("open_trade"):
-        print("\nScanning for BOS+FVG signal...")
+
+        # ── Stage 2: Check for entry signal ──────────────────────
+        print("\nScanning for entry signal...")
         sig = find_signal(candles)
         if sig:
             sig_id = f"{sig['type']}_{sig['time']}_{round(sig['entry'])}"
@@ -403,18 +451,12 @@ def main():
                     f"Leverage:   {leverage}x\n\n"
                     f"⏰ {cur_time}"
                 )
-                print(f"Signal: {dl} ${sig['entry']:,.1f} SL:${sig['sl']:,.1f} TP:${sig['tp']:,.1f} RR:{sig['rr']}x Lev:{leverage}x")
+                print(f"Signal: {dl} ${sig['entry']:,.1f} RR:{sig['rr']}x Lev:{leverage}x")
                 state["open_trade"] = sig
             else:
-                print(f"Already seen: {sig_id}")
+                print(f"Signal already seen: {sig_id}")
+
         else:
-            print("No signal this run.")
-    else:
-        print("Open trade active — skipping scan.")
-
-    save_state(state)
-    print(f"\nDone. Run #{state['run_count']}")
-
-if __name__ == "__main__":
-    main()
-            
+            # ── Stage 1: Scan for forming setups ─────────────────
+            print("\nNo entry signal — scanning for forming setups...")
+            setups = find_setups(ca
