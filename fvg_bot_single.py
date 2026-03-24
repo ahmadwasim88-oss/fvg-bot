@@ -459,4 +459,35 @@ def main():
         else:
             # ── Stage 1: Scan for forming setups ─────────────────
             print("\nNo entry signal — scanning for forming setups...")
-            setups = find_setups(ca
+            setups = find_setups(candles)
+            for setup in setups:
+                setup_id = f"{setup['type']}_{setup['bos_time']}_{round(setup['fvg_top'])}"
+                if setup_id not in state["seen_setups"]:
+                    state["seen_setups"].append(setup_id)
+                    state["seen_setups"] = state["seen_setups"][-50:]
+
+                    de = "📈" if setup["type"] == "bull" else "📉"
+                    dl = "LONG" if setup["type"] == "bull" else "SHORT"
+                    watch = "pullback into" if setup["type"] == "bull" else "retracement into"
+
+                    send_telegram(
+                        f"👀 <b>SETUP FORMING · {de} {dl}</b>\n\n"
+                        f"<b>BTC/USDT.P · 15m · BOS+FVG</b>\n\n"
+                        f"BOS level:  ${setup['bos_level']:,.1f} ✅ broken\n"
+                        f"FVG zone:   ${setup['fvg_bot']:,.1f} – ${setup['fvg_top']:,.1f} ({setup['gap']}%) ✅ formed\n\n"
+                        f"Current:    ${cur:,.1f}\n"
+                        f"Distance:   {setup['dist_to_fvg']:.2f}% to FVG\n\n"
+                        f"⏳ Waiting for {watch} FVG zone\n"
+                        f"🎯 Entry fires when price reaches ${setup['fvg_top']:,.1f}\n\n"
+                        f"⏰ {cur_time}"
+                    )
+                    print(f"Setup alert: {dl} FVG ${setup['fvg_bot']:,.1f}–${setup['fvg_top']:,.1f} dist:{setup['dist_to_fvg']:.2f}%")
+
+            if not setups:
+                print("No setups forming.")
+
+    save_state(state)
+    print(f"\nDone. Run #{state['run_count']}")
+
+if __name__ == "__main__":
+    main()
