@@ -32,6 +32,8 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           ACCOUNT_SIZE:     ${{ secrets.ACCOUNT_SIZE }}
           RISK_PCT:         ${{ secrets.RISK_PCT }}
+          VOL_FILTER:       "1.5"
+          VOL_LOOKBACK:     "20"
         run: python fvg_bot_single.py
 
       - name: Save state
