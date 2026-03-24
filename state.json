@@ -1,6 +1,7 @@
 {
   "open_trade": null,
   "seen_signals": [],
+  "seen_setups": [],
   "trades": [
     {
       "type": "bull",
