@@ -1,6 +1,22 @@
 {
-  "open_trade": null,
-  "seen_signals": [],
+  "open_trade": {
+    "type": "bull",
+    "entry": 67531.9,
+    "sl": 67131.97,
+    "tp": 68384.5,
+    "sl_pct": 0.59,
+    "tp_pct": 1.26,
+    "rr": 2.13,
+    "gap": 0.76,
+    "leverage": 20,
+    "fvg_top": 67779.2,
+    "fvg_bot": 67266.5,
+    "bos_level": 67843.0,
+    "time": 1774933200000
+  },
+  "seen_signals": [
+    "bull_1774933200000_67532"
+  ],
   "seen_setups": [
     "bear_1774608300000_67669",
     "bull_1774920600000_67779"
@@ -16,6 +32,6 @@
   ],
   "wins": 0,
   "losses": 1,
-  "run_count": 302,
+  "run_count": 303,
   "last_daily": "2026-03-31"
 }
