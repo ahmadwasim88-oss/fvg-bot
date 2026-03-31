@@ -2,7 +2,8 @@
   "open_trade": null,
   "seen_signals": [],
   "seen_setups": [
-    "bear_1774608300000_67669"
+    "bear_1774608300000_67669",
+    "bull_1774920600000_67779"
   ],
   "trades": [
     {
@@ -15,6 +16,6 @@
   ],
   "wins": 0,
   "losses": 1,
-  "run_count": 301,
-  "last_daily": "2026-03-30"
+  "run_count": 302,
+  "last_daily": "2026-03-31"
 }
