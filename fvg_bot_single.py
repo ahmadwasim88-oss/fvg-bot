@@ -17,9 +17,9 @@ MAX_EMA_DIST   = 4.0
 SL_BUFFER      = 0.2
 SWING_LOOKBACK = 15
 MIN_RR         = 1.8
-MAX_LEVERAGE   = 20
-VOL_FILTER     = float(os.environ.get("VOL_FILTER", "1.5"))
-VOL_LOOKBACK   = int(os.environ.get("VOL_LOOKBACK", "20"))
+MAX_LEVERAGE   = 60
+VOL_FILTER     = float(os.environ.get("VOL_FILTER", "1.0"))
+VOL_LOOKBACK   = int(os.environ.get("VOL_LOOKBACK", "25"))
 
 STATE_FILE = "state.json"
 
