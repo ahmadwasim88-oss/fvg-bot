@@ -1,9 +1,9 @@
+```python
 import requests
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
-# ── Config ────────────────────────────────────────────────────────
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 ACCOUNT_SIZE     = float(os.environ.get("ACCOUNT_SIZE", "1000"))
@@ -22,6 +22,7 @@ VOL_FILTER     = float(os.environ.get("VOL_FILTER", "1.0"))
 VOL_LOOKBACK   = int(os.environ.get("VOL_LOOKBACK", "25"))
 
 STATE_FILE = "state.json"
+IST = timezone(timedelta(hours=5, minutes=30))
 
 # ── Telegram ──────────────────────────────────────────────────────
 def send_telegram(msg):
@@ -111,10 +112,6 @@ def nearest_swing_low_below(candles, entry, lookback):
 
 # ── Stage 1: Find active setups (BOS + FVG formed, waiting for pullback) ──
 def find_setups(candles):
-    """
-    Scans for BOS+FVG setups where price has NOT yet pulled back into FVG.
-    Returns list of active setups to watch.
-    """
     closes = [c["c"] for c in candles]
     ema    = calc_ema(closes, EMA_PERIOD)
     lb     = BOS_LOOKBACK
@@ -123,7 +120,7 @@ def find_setups(candles):
     last_ev = ema[n-1]
     setups  = []
 
-    for i in range(max(lb+2, n-30), n-1):  # scan last 30 candles for setups
+    for i in range(max(lb+2, n-30), n-1):
         prev      = candles[i-lb:i]
         prev_high = max(c["h"] for c in prev)
         prev_low  = min(c["l"] for c in prev)
@@ -134,7 +131,6 @@ def find_setups(candles):
         bos_vol_ok = (VOL_FILTER <= 0 or
                       c_bos.get("v", 0) >= avg_volume(candles, i, VOL_LOOKBACK) * VOL_FILTER)
 
-        # ── Bullish BOS + FVG setup ───────────────────────────────
         if c_bos["c"] > prev_high and bos_vol_ok:
             for fi in range(max(lb+2, i-10), i+1):
                 if fi < 2: continue
@@ -143,7 +139,6 @@ def find_setups(candles):
                     gap = (c3["l"] - c1["h"]) / c1["h"] * 100
                     if not (MIN_GAP <= gap <= MAX_GAP): continue
                     fvg_top, fvg_bot = c3["l"], c1["h"]
-                    # Setup valid: price is ABOVE FVG (hasn't pulled back yet)
                     if cur > fvg_top:
                         slope = ema_slope(ema, n-1)
                         if last_ev and cur > last_ev and slope > 0:
@@ -159,7 +154,6 @@ def find_setups(candles):
                             })
                     break
 
-        # ── Bearish BOS + FVG setup ───────────────────────────────
         if c_bos["c"] < prev_low and bos_vol_ok:
             for fi in range(max(lb+2, i-10), i+1):
                 if fi < 2: continue
@@ -168,7 +162,6 @@ def find_setups(candles):
                     gap = (c1["l"] - c3["h"]) / c3["h"] * 100
                     if not (MIN_GAP <= gap <= MAX_GAP): continue
                     fvg_top, fvg_bot = c1["l"], c3["h"]
-                    # Setup valid: price is BELOW FVG (hasn't pulled back yet)
                     if cur < fvg_bot:
                         slope = ema_slope(ema, n-1)
                         if last_ev and cur < last_ev and slope < 0:
@@ -331,8 +324,11 @@ def check_open_trade(candles, state):
 
 # ── Daily update ──────────────────────────────────────────────────
 def maybe_send_daily(candles, state, source):
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    hour  = datetime.now(timezone.utc).hour
+    now_utc = datetime.now(timezone.utc)
+    now_ist = now_utc.astimezone(IST)
+    today = now_utc.strftime("%Y-%m-%d")
+    hour  = now_utc.hour
+    
     if state.get("last_daily") == today or not (2 <= hour < 4):
         return state
 
@@ -354,7 +350,7 @@ def maybe_send_daily(candles, state, source):
     send_telegram(
         f"📅 <b>Daily Update · BOS+FVG Bot</b>\n\n"
         f"BTC/USDT.P: <b>${cur:,.1f}</b>\n"
-        f"Time: {datetime.now(timezone.utc).strftime('%H:%M UTC')}\n"
+        f"Time: {now_utc.strftime('%H:%M UTC')} | {now_ist.strftime('%H:%M IST')}\n"
         f"Source: {source}\n"
         f"{open_info}\n"
         f"📊 <b>Record:</b> {state['wins']}W / {state['losses']}L "
@@ -369,8 +365,11 @@ def maybe_send_daily(candles, state, source):
 
 # ── Main ──────────────────────────────────────────────────────────
 def main():
+    now_utc = datetime.now(timezone.utc)
+    now_ist = now_utc.astimezone(IST)
+    
     print(f"\n{'='*50}")
-    print(f"BOS+FVG Bot · {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC")
+    print(f"BOS+FVG Bot · {now_utc.strftime('%Y-%m-%d %H:%M')} UTC · {now_ist.strftime('%H:%M')} IST")
     print(f"Account: ${ACCOUNT_SIZE:,.0f}  Risk: {RISK_PCT}%  Vol: {VOL_FILTER}x")
     print(f"{'='*50}")
 
@@ -386,10 +385,11 @@ def main():
         send_telegram(f"⚠️ BOS+FVG Bot: candle fetch failed\n{e}")
         return
 
-    cur_time = datetime.utcfromtimestamp(candles[-1]["t"]/1000).strftime("%H:%M UTC")
+    ts_val = candles[-1]["t"] / 1000
+    cur_time_utc = datetime.fromtimestamp(ts_val, timezone.utc).strftime("%H:%M UTC")
+    cur_time_ist = datetime.fromtimestamp(ts_val, IST).strftime("%H:%M IST")
     cur = candles[-1]["c"]
 
-    # ── Price update ──────────────────────────────────────────────
     high = max(c["h"] for c in candles[-96:])
     low  = min(c["l"] for c in candles[-96:])
     chg  = (cur - candles[-96]["c"]) / candles[-96]["c"] * 100
@@ -401,27 +401,24 @@ def main():
         side  = "LONG" if t["type"] == "bull" else "SHORT"
         lsign = "+" if live > 0 else ""
         trade_line = "\n📂 Open " + side + ": $" + "{:,.1f}".format(t["entry"]) + " → " + lsign + "{:.2f}%".format(live)
+    
     price_msg = (
         "💹 <b>BTC/USDT.P</b>  $" + "{:,.1f}".format(cur) + "\n" +
         "24h: " + chg_sign + "{:.2f}%".format(chg) + "  " +
         "H: $" + "{:,.1f}".format(high) + "  L: $" + "{:,.1f}".format(low) +
         trade_line + "\n" +
-        "⏰ " + cur_time
+        "⏰ " + cur_time_utc + " | " + cur_time_ist
     )
     send_telegram(price_msg)
 
-    # ── Daily heartbeat ───────────────────────────────────────────
     state = maybe_send_daily(candles, state, source)
 
-    # ── Check open trade exit ─────────────────────────────────────
     if state.get("open_trade"):
         t = state["open_trade"]
         print(f"\nOpen {t['type'].upper()} | Entry:${t['entry']:,.1f} SL:${t['sl']:,.1f} TP:${t['tp']:,.1f}")
         state = check_open_trade(candles, state)
 
     if not state.get("open_trade"):
-
-        # ── Stage 2: Check for entry signal ──────────────────────
         print("\nScanning for entry signal...")
         sig = find_signal(candles)
         if sig:
@@ -449,15 +446,13 @@ def main():
                     f"Risk $:     ${risk_dollar:,.0f}\n"
                     f"Notional:   ${notional:,.0f}\n"
                     f"Leverage:   {leverage}x\n\n"
-                    f"⏰ {cur_time}"
+                    f"⏰ {cur_time_utc} | {cur_time_ist}"
                 )
                 print(f"Signal: {dl} ${sig['entry']:,.1f} RR:{sig['rr']}x Lev:{leverage}x")
                 state["open_trade"] = sig
             else:
                 print(f"Signal already seen: {sig_id}")
-
         else:
-            # ── Stage 1: Scan for forming setups ─────────────────
             print("\nNo entry signal — scanning for forming setups...")
             setups = find_setups(candles)
             for setup in setups:
@@ -479,7 +474,7 @@ def main():
                         f"Distance:   {setup['dist_to_fvg']:.2f}% to FVG\n\n"
                         f"⏳ Waiting for {watch} FVG zone\n"
                         f"🎯 Entry fires when price reaches ${setup['fvg_top']:,.1f}\n\n"
-                        f"⏰ {cur_time}"
+                        f"⏰ {cur_time_utc} | {cur_time_ist}"
                     )
                     print(f"Setup alert: {dl} FVG ${setup['fvg_bot']:,.1f}–${setup['fvg_top']:,.1f} dist:{setup['dist_to_fvg']:.2f}%")
 
@@ -491,3 +486,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+```
