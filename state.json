@@ -1,19 +1,5 @@
 {
-  "open_trade": {
-    "type": "bear",
-    "entry": 61025.5,
-    "sl": 60738.63,
-    "tp": 59500.1,
-    "sl_pct": 0.47,
-    "tp_pct": 2.5,
-    "rr": 5.32,
-    "gap": 0.47,
-    "leverage": 42.5,
-    "fvg_top": 60617.4,
-    "fvg_bot": 60333.4,
-    "bos_level": 60129.5,
-    "time": 1780731000000
-  },
+  "open_trade": null,
   "seen_signals": [
     "bull_1774933200000_67532",
     "bull_1776186000000_74672",
@@ -116,10 +102,17 @@
       "exit": 61722.4,
       "result": "sl",
       "pnl": -0.13
+    },
+    {
+      "type": "bear",
+      "entry": 61025.5,
+      "exit": 61081.7,
+      "result": "sl",
+      "pnl": -0.47
     }
   ],
   "wins": 2,
-  "losses": 5,
-  "run_count": 1352,
+  "losses": 6,
+  "run_count": 1353,
   "last_daily": "2026-06-03"
 }
