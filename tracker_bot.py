@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 API_BASE = "https://api.coingecko.com/api/v3"
-API_KEY  = os.environ.get("COINGECKO_API_KEY", "CG-G1MtEv33nwCgRyvF4YNsKyDs")
+API_KEY  = os.environ.get("COINGECKO_API_KEY") or "CG-G1MtEv33nwCgRyvF4YNsKyDs"
 
 STATE_FILE = "state.json"
 
