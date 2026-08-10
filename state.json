@@ -2,5 +2,7 @@
   "signals": {},
   "ta_cache": {},
   "last_daily": "",
-  "dca_log": {}
+  "dca_log": {},
+  "run_count": 1,
+  "seen_setups": []
 }
