@@ -1,4 +1,4 @@
-name: Portfolio Tracker Bot
+name: Spot Tracker Bot
 
 on:
   schedule:
@@ -32,8 +32,8 @@ jobs:
 
       - name: Save state
         run: |
-          git config user.name "Portfolio Tracker Bot"
-          git config user.email "bot@portfoliotracker.com"
+          git config user.name "Spot Tracker Bot"
+          git config user.email "bot@spottracker.com"
           git stash
           git pull --rebase origin main
           git stash pop || true
