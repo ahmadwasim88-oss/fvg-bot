@@ -6,7 +6,7 @@
     "polkadot": "WAIT",
     "theta-fuel": "WAIT",
     "polygon-ecosystem-token": "WAIT",
-    "the-graph": "ACCUMULATE",
+    "the-graph": "WAIT",
     "avalanche-2": "WAIT",
     "1inch": "WAIT",
     "internet-computer": "WAIT",
@@ -4891,6 +4891,6 @@
       "timestamp": 1786930647265.6626
     }
   },
-  "last_daily": "2026-08-16",
+  "last_daily": "2026-08-17",
   "dca_log": {}
 }
