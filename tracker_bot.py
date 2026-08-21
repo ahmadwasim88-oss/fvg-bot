@@ -37,7 +37,7 @@ DCA_DEEP_PCT      = -70
 DCA_MODERATE_PCT  = -40
 DCA_WATCH_PCT     = -20
 DCA_DIP_WINDOW_DAYS = 90
-DCA_DIP_NEAR_PCT    = 3
+DCA_DIP_NEAR_PCT    = 3  # fallback only, used before a coin has enough TA history — see nearLowThresholdPct
 DCA_VOL_LOOKBACK_DAYS = 20
 DCA_GAP_MULT      = 3.0
 DCA_GAP_FLOOR_PCT = 5
@@ -50,7 +50,7 @@ EMA_TREND_FAST_SHORT = 20
 EMA_TREND_FAST_LONG  = 50
 EMA_TREND_LONG = 200
 RSI_PERIOD    = 14
-RSI_OVERSOLD  = 30
+RSI_OVERSOLD  = 30  # fallback only, used when a coin lacks enough RSI history — see rsiOversoldThreshold
 TARGET_PROXIMITY_PCT = 3
 LIQUIDITY_DEAD_RATIO = 0.0005
 ABSOLUTE_DEAD_VOLUME = 100000
@@ -58,6 +58,29 @@ MICROCAP_FLOOR = 2000000
 RANK_CAUTION   = 500
 TA_HISTORY_DAYS = 365
 TA_ALIGN_BUFFER_MIN = 15  # TA is treated stale once per UTC day, 15 min after 00:00 UTC
+
+# Not every coin's RSI oscillates through the same range — low-volatility coins (often BTC) can
+# bottom at RSI 35-40 and never print sub-30, while high-beta alts blow through 20. "Oversold" is
+# instead defined per coin: the ~15th percentile of its OWN RSI history.
+RSI_OVERSOLD_PERCENTILE = 15
+RSI_OVERSOLD_MIN_SAMPLES = 60
+RSI_OVERSOLD_FLOOR = 20
+RSI_OVERSOLD_CEIL = 45
+
+# Same story for "near its low" and "how deep is an extreme ATH drawdown" — a fixed % assumes
+# every coin swings the same amount. Both are scaled by each coin's own trailing daily-move
+# average (DCA_VOL_LOOKBACK_DAYS) relative to VOL_SCALE_REF_PCT, clamped so an illiquid/outlier
+# reading can't blow the bands out.
+VOL_SCALE_REF_PCT = 3
+VOL_SCALE_MIN = 0.6
+VOL_SCALE_MAX = 1.8
+ATH_TIER_ABS_FLOOR_PCT = -95  # beyond this a coin's likely dead/delisted, not "still watching"
+ATH_TIER_ABS_CEIL_PCT = -12   # watch tier shouldn't fire this close to ATH even for a very calm coin
+DCA_NEAR_LOW_MULT = 1.0
+DCA_NEAR_LOW_FLOOR_PCT = 1.5
+DCA_NEAR_LOW_CEIL_PCT = 8
+
+TA_SCHEMA_VERSION = 2  # bump forces a TA cache refresh when the ta dict's shape changes
 
 # ── Telegram ──────────────────────────────────────────────────────
 def send_telegram(msg):
@@ -134,9 +157,17 @@ def calc_avg_daily_move_pct(closes, days):
             n += 1
     return s / n if n else None
 
-def reconstruct_streak_days(closes, cur):
+def percentile_of(sorted_asc, pct):
+    if not sorted_asc:
+        return None
+    idx = int((pct / 100) * (len(sorted_asc) - 1))
+    return sorted_asc[idx]
+
+def reconstruct_streak_days(closes, cur, rsi_threshold=None, near_low_threshold_pct=None):
     if not closes or cur is None:
         return 1
+    threshold = rsi_threshold if rsi_threshold is not None else RSI_OVERSOLD
+    near_low_pct = near_low_threshold_pct if near_low_threshold_pct is not None else DCA_DIP_NEAR_PCT
     series = closes + [cur]
     rsi_series = calc_rsi_series(series, RSI_PERIOD)
     streak = 0
@@ -147,7 +178,7 @@ def reconstruct_streak_days(closes, cur):
         window_start = max(0, i - DCA_DIP_WINDOW_DAYS + 1)
         low = min(series[window_start:i + 1])
         above_low = (series[i] - low) / low * 100
-        if not (above_low <= DCA_DIP_NEAR_PCT and rsi <= RSI_OVERSOLD):
+        if not (above_low <= near_low_pct and rsi <= threshold):
             break
         streak += 1
     return streak or 1
@@ -160,13 +191,43 @@ def compute_ta_from_closes(closes):
     dip_window = closes[-DCA_DIP_WINDOW_DAYS:]
     rolling_low = min(dip_window) if dip_window else None
     rolling_low_index = dip_window.index(rolling_low) if dip_window else -1
+
+    valid_rsi = [v for v in rsi_series if v is not None]
+    rsi_oversold_threshold = RSI_OVERSOLD
+    if len(valid_rsi) >= RSI_OVERSOLD_MIN_SAMPLES:
+        p = percentile_of(sorted(valid_rsi), RSI_OVERSOLD_PERCENTILE)
+        if p is not None:
+            rsi_oversold_threshold = max(RSI_OVERSOLD_FLOOR, min(RSI_OVERSOLD_CEIL, p))
+
+    avg_daily_move = calc_avg_daily_move_pct(closes, DCA_VOL_LOOKBACK_DAYS)
+    vol_scale = max(VOL_SCALE_MIN, min(VOL_SCALE_MAX, avg_daily_move / VOL_SCALE_REF_PCT)) if avg_daily_move is not None else 1
+    near_low_threshold_pct = max(
+        DCA_NEAR_LOW_FLOOR_PCT,
+        min(DCA_NEAR_LOW_CEIL_PCT, (avg_daily_move if avg_daily_move is not None else DCA_NEAR_LOW_FLOOR_PCT) * DCA_NEAR_LOW_MULT)
+    )
+
+    def clamp_tier(base):
+        return max(ATH_TIER_ABS_FLOOR_PCT, min(ATH_TIER_ABS_CEIL_PCT, base * vol_scale))
+
+    ath_tiers = {
+        "extreme": clamp_tier(DCA_EXTREME_PCT),
+        "deep": clamp_tier(DCA_DEEP_PCT),
+        "moderate": clamp_tier(DCA_MODERATE_PCT),
+        "watch": clamp_tier(DCA_WATCH_PCT),
+    }
+
     return {
         "rsi": rsi_series[-1] if rsi_series else None,
+        "rsiOversoldThreshold": rsi_oversold_threshold,
+        "avgDailyMove": avg_daily_move,
+        "nearLowThresholdPct": near_low_threshold_pct,
+        "athTiers": ath_tiers,
         "emaLong": ema_long_series[-1] if ema_long_series else None,
         "rollingLow": rolling_low,
         "rollingLowDaysAgo": (len(dip_window) - rolling_low_index) if rolling_low_index >= 0 else None,
         "rollingLowWindowDays": len(dip_window),
         "closes": closes,
+        "schemaVersion": TA_SCHEMA_VERSION,
         "timestamp": time.time() * 1000,
     }
 
@@ -270,6 +331,7 @@ def classify_holding(coin_id, md, item, ta, macro_ta, dca_log):
     at_risk = (not dead_liquidity) and microcap and poor_rank
 
     depth = abs(ath_pct) if ath_pct is not None else None
+    ath_tiers = (ta or {}).get("athTiers") or {"extreme": DCA_EXTREME_PCT, "deep": DCA_DEEP_PCT, "moderate": DCA_MODERATE_PCT, "watch": DCA_WATCH_PCT}
 
     if dead_liquidity:
         signal, strength = "EXIT", (90 if (no_trading_data or zero_mcap) else max(60, min(95, round(100 - (vol_mcap_ratio or 0) / LIQUIDITY_DEAD_RATIO * 40))))
@@ -281,13 +343,13 @@ def classify_holding(coin_id, md, item, ta, macro_ta, dca_log):
         signal, strength = "AT RISK", 50
         reason = f"Micro-cap ({mcap:,.0f}, rank {rank}) with real survival risk."
     elif ath_pct is not None:
-        if ath_pct <= DCA_EXTREME_PCT:
+        if ath_pct <= ath_tiers["extreme"]:
             signal, strength, reason = "WAIT", 20, f"{depth:.0f}% below ATH — statistically extreme."
-        elif ath_pct <= DCA_DEEP_PCT:
+        elif ath_pct <= ath_tiers["deep"]:
             signal, strength, reason = "WAIT", 30, f"{depth:.0f}% below ATH — deep discount."
-        elif ath_pct <= DCA_MODERATE_PCT:
+        elif ath_pct <= ath_tiers["moderate"]:
             signal, strength, reason = "WAIT", 25, f"{depth:.0f}% below ATH — meaningful discount."
-        elif ath_pct <= DCA_WATCH_PCT:
+        elif ath_pct <= ath_tiers["watch"]:
             signal, strength, reason = "HOLD", 35, f"Only {depth:.0f}% below ATH — not deep enough yet."
         else:
             signal, strength, reason = "TRIM", 55, f"Just {depth:.0f}% below ATH — closer to profit-taking zone."
@@ -314,25 +376,27 @@ def classify_holding(coin_id, md, item, ta, macro_ta, dca_log):
 
         if ta and ta.get("rollingLow") is not None and cur is not None:
             above_low = (cur - effective_low) / effective_low * 100
-            near_low = above_low <= DCA_DIP_NEAR_PCT
-            rsi_oversold = live_rsi is not None and live_rsi <= RSI_OVERSOLD
-            avg_daily_move = calc_avg_daily_move_pct(ta.get("closes"), DCA_VOL_LOOKBACK_DAYS)
+            near_low_threshold_pct = ta.get("nearLowThresholdPct", DCA_DIP_NEAR_PCT)
+            near_low = above_low <= near_low_threshold_pct
+            rsi_threshold = ta.get("rsiOversoldThreshold", RSI_OVERSOLD)
+            rsi_oversold = live_rsi is not None and live_rsi <= rsi_threshold
+            avg_daily_move = ta.get("avgDailyMove")
             if near_low and rsi_oversold:
-                dca_streak_day = reconstruct_streak_days(ta["closes"], cur)
+                dca_streak_day = reconstruct_streak_days(ta["closes"], cur, rsi_threshold, near_low_threshold_pct)
                 last_log = (dca_log or {}).get(coin_id)
                 dyn_gap_pct = max(DCA_GAP_FLOOR_PCT, min(DCA_GAP_CEIL_PCT, (avg_daily_move or DCA_GAP_FLOOR_PCT) * DCA_GAP_MULT))
                 gap_pct = ((last_log["price"] - cur) / last_log["price"] * 100) if last_log else None
                 gap_cleared = last_log is None or gap_pct >= dyn_gap_pct
                 if gap_cleared:
                     signal, strength = "ACCUMULATE", round(min(60, strength + 30) + rel_bonus)
-                    reason = f"{depth:.0f}% below ATH, {above_low:.1f}% above its {ta['rollingLowWindowDays']}-day low, RSI {live_rsi:.0f} (oversold) — day {dca_streak_day}.{rel_note}"
+                    reason = f"{depth:.0f}% below ATH, {above_low:.1f}% above its {ta['rollingLowWindowDays']}-day low (band \u2264{near_low_threshold_pct:.1f}%), RSI {live_rsi:.0f} (oversold vs own \u2264{rsi_threshold:.0f}) — day {dca_streak_day}.{rel_note}"
                 else:
                     reason = f"Meets add conditions (day {dca_streak_day}) but only {gap_pct:.1f}% below last logged DCA — needs \u2265{dyn_gap_pct:.1f}%.{rel_note}"
             else:
                 if near_low and not rsi_oversold:
-                    reason = f"{depth:.0f}% below ATH and near its {ta['rollingLowWindowDays']}-day low, but RSI ({'—' if live_rsi is None else f'{live_rsi:.0f}'}) isn't oversold yet."
+                    reason = f"{depth:.0f}% below ATH and near its {ta['rollingLowWindowDays']}-day low, but RSI ({'—' if live_rsi is None else f'{live_rsi:.0f}'}) hasn't reached its own oversold zone (\u2264{rsi_threshold:.0f}) yet."
                 else:
-                    reason = f"{depth:.0f}% below ATH, not near its {ta['rollingLowWindowDays']}-day low yet ({abs(above_low):.1f}% {'above' if above_low >= 0 else 'below'})."
+                    reason = f"{depth:.0f}% below ATH, but {abs(above_low):.1f}% {'above' if above_low >= 0 else 'below'} its {ta['rollingLowWindowDays']}-day low — outside its own \u2264{near_low_threshold_pct:.1f}% near-low band."
         else:
             reason = "Not enough price history loaded yet."
 
@@ -345,6 +409,8 @@ def classify_holding(coin_id, md, item, ta, macro_ta, dca_log):
         "signal": signal, "strength": strength, "reason": reason, "cmp": cur,
         "athPct": ath_pct, "rsi": live_rsi, "sentiment": sentiment,
         "relStrengthVsBtc": rel_strength, "dcaStreakDay": dca_streak_day,
+        "rsiOversoldThreshold": (ta or {}).get("rsiOversoldThreshold", RSI_OVERSOLD),
+        "nearLowThresholdPct": (ta or {}).get("nearLowThresholdPct", DCA_DIP_NEAR_PCT),
     }
 
 # ── TA refresh (once/day, boundary-aligned like taBoundaryPassedSince) ──
@@ -360,7 +426,12 @@ def ta_boundary_passed_since(ts_ms):
 
 def refresh_ta(state, ids):
     ta_cache = state.setdefault("ta_cache", {})
-    stale = [cid for cid in ids if cid not in ta_cache or ta_boundary_passed_since(ta_cache[cid].get("timestamp"))]
+    stale = [
+        cid for cid in ids
+        if cid not in ta_cache
+        or ta_boundary_passed_since(ta_cache[cid].get("timestamp"))
+        or ta_cache[cid].get("schemaVersion") != TA_SCHEMA_VERSION
+    ]
     updated = 0
     for cid in stale:
         closes = fetch_ta_history(cid)
